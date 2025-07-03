@@ -27,6 +27,9 @@ resource "google_cloudfunctions2_function" "default" {
     }
     service_account = var.build_service_account
   }
+  event_trigger {
+    event_type = "google.cloud.pubsub.topic.v1.messagePublished"
+  }
 
   service_config {
     max_instance_count             = coalesce(var.max_instance_count, 1)
