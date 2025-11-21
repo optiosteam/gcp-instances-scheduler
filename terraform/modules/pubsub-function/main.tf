@@ -28,7 +28,8 @@ resource "google_cloudfunctions2_function" "default" {
     service_account = var.build_service_account
   }
   event_trigger {
-    event_type = "google.cloud.pubsub.topic.v1.messagePublished"
+    event_type   = "google.cloud.pubsub.topic.v1.messagePublished"
+    retry_policy = "RETRY_POLICY_DO_NOT_RETRY"
   }
 
   service_config {
