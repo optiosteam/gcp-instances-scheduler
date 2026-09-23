@@ -22,8 +22,7 @@ functions.cloudEvent("startInstances", async (cloudEvent) => {
     await Promise.all(
       clusters.map(async (cluster) => {
         console.log(`Starting cluster ${cluster.name}`);
-        await removeShutdownNodePoolTaint(project, cluster);
-        await resizeClusterNodePool(project, cluster, 1);
+        await startClusterNodePools(project, cluster);
       })
     );
 
@@ -53,16 +52,52 @@ functions.cloudEvent("stopInstances", async (cloudEvent) => {
   }
 });
 
-const resizeClusterNodePool = async (project, cluster, nodePoolSize) => {
-  for (nodePool of cluster.nodePools) {
-    const name = `projects/${project}/locations/${cluster.location}/clusters/${cluster.name}/nodePools/${nodePool.name}`;
-    console.log(`Resizing node pool ${cluster.name}/${nodePool.name}`);
-    const [operation] = await clusterClient.setNodePoolSize({
-      name,
-      nodeCount: nodePoolSize,
-    });
-    await waitForOperation(project, cluster.location, operation);
+// Node pools are started one at a time, and a run can end before it reaches the
+// last one. Pools without autoscaling never recover from a missed start, so they
+// go first. Pools with an autoscaling maximum of 0 are meant to stay empty, so
+// they only get their shutdown taint removed and are not resized.
+const startClusterNodePools = async (project, cluster) => {
+  const nodePools = [...cluster.nodePools].sort(
+    (a, b) => startOrder(a) - startOrder(b)
+  );
+  for (const nodePool of nodePools) {
+    await removeShutdownNodePoolTaint(project, cluster, nodePool);
+    if (isKeptEmpty(nodePool)) {
+      console.log(
+        `Skipping resize of node pool ${cluster.name}/${nodePool.name}: autoscaling maximum is 0`
+      );
+      continue;
+    }
+    await resizeNodePool(project, cluster, nodePool, 1);
   }
+};
+
+const startOrder = (nodePool) => {
+  if (!nodePool.autoscaling?.enabled) {
+    return 0;
+  }
+  return isKeptEmpty(nodePool) ? 2 : 1;
+};
+
+const isKeptEmpty = (nodePool) =>
+  !!nodePool.autoscaling?.enabled &&
+  !nodePool.autoscaling.maxNodeCount &&
+  !nodePool.autoscaling.totalMaxNodeCount;
+
+const resizeClusterNodePool = async (project, cluster, nodePoolSize) => {
+  for (const nodePool of cluster.nodePools) {
+    await resizeNodePool(project, cluster, nodePool, nodePoolSize);
+  }
+};
+
+const resizeNodePool = async (project, cluster, nodePool, nodePoolSize) => {
+  const name = `projects/${project}/locations/${cluster.location}/clusters/${cluster.name}/nodePools/${nodePool.name}`;
+  console.log(`Resizing node pool ${cluster.name}/${nodePool.name}`);
+  const [operation] = await clusterClient.setNodePoolSize({
+    name,
+    nodeCount: nodePoolSize,
+  });
+  await waitForOperation(project, cluster.location, operation);
 };
 
 const appendShutdownNodePoolTaint = async (project, cluster) => {
@@ -83,17 +118,15 @@ const appendShutdownNodePoolTaint = async (project, cluster) => {
   }
 };
 
-const removeShutdownNodePoolTaint = async (project, cluster) => {
-  for (nodePool of cluster.nodePools) {
-    if (hasShutdownTaint(nodePool.config.taints)) {
-      const taints = nodePool.config.taints.filter(
-        (taint) => taint.key !== SHUTDOWN_TAINT_KEY
-      );
-      console.log(
-        `Removing shutdown node pool taint ${cluster.name}/${nodePool.name}`
-      );
-      await updateClusterNodePoolTaints(project, cluster, nodePool, taints);
-    }
+const removeShutdownNodePoolTaint = async (project, cluster, nodePool) => {
+  if (hasShutdownTaint(nodePool.config.taints)) {
+    const taints = nodePool.config.taints.filter(
+      (taint) => taint.key !== SHUTDOWN_TAINT_KEY
+    );
+    console.log(
+      `Removing shutdown node pool taint ${cluster.name}/${nodePool.name}`
+    );
+    await updateClusterNodePoolTaints(project, cluster, nodePool, taints);
   }
 };
 
