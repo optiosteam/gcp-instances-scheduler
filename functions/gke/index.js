@@ -100,18 +100,25 @@ const resizeNodePool = async (project, cluster, nodePool, nodePoolSize) => {
   await waitForOperation(project, cluster.location, operation);
 };
 
+// NoExecute evicts whatever still runs on the pool. NoSchedule is needed as well:
+// GKE's mdp-controller tolerates every NoExecute taint, so with NoExecute alone
+// the autoscaler adds a node for it and that node stays up all night.
+const SHUTDOWN_TAINT_EFFECTS = ["NO_EXECUTE", "NO_SCHEDULE"];
+
 const appendShutdownNodePoolTaint = async (project, cluster) => {
   for (nodePool of cluster.nodePools) {
-    const shutdownTaint = {
+    const missingTaints = SHUTDOWN_TAINT_EFFECTS.filter(
+      (effect) => !hasShutdownTaint(nodePool.config.taints, effect)
+    ).map((effect) => ({
       key: SHUTDOWN_TAINT_KEY,
       value: SHUTDOWN_TAINT_VALUE,
-      effect: "NO_EXECUTE",
-    };
-    
-    if (!hasShutdownTaint(nodePool.config.taints)) {
-      const taints = [...nodePool.config.taints, shutdownTaint];
+      effect,
+    }));
+
+    if (missingTaints.length > 0) {
+      const taints = [...nodePool.config.taints, ...missingTaints];
       console.log(
-        `Appending shutdown node pool taint ${cluster.name}/${nodePool.name}`
+        `Appending shutdown node pool taints ${cluster.name}/${nodePool.name}`
       );
       await updateClusterNodePoolTaints(project, cluster, nodePool, taints);
     }
@@ -130,10 +137,12 @@ const removeShutdownNodePoolTaint = async (project, cluster, nodePool) => {
   }
 };
 
-const hasShutdownTaint = (taints) =>
+const hasShutdownTaint = (taints, effect) =>
   taints.findIndex(
-    ({ key, value }) =>
-      key === SHUTDOWN_TAINT_KEY && value === SHUTDOWN_TAINT_VALUE
+    (taint) =>
+      taint.key === SHUTDOWN_TAINT_KEY &&
+      taint.value === SHUTDOWN_TAINT_VALUE &&
+      (!effect || taint.effect === effect)
   ) !== -1;
 
 const updateClusterNodePoolTaints = async (
